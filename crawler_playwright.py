@@ -25,13 +25,13 @@ from bs4 import BeautifulSoup
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-INPUT_FILE          = Path(r"C:/PYTHON/.entree/SitesSources/sites_actus_labos.yaml")
+INPUT_FILE          = Path(r"C:/PYTHON/.entree/SitesSources/sites_veille_ia.yaml")
 OUTPUT_DIR          = Path(r"C:/PYTHON/.data/Resultatscrawling")
 JOURNAL_FILE        = Path(r"C:/PYTHON/.data/Resultatscrawling/journal.json")
 DELAY_MIN           = 2.0   # secondes, délai minimum entre deux requêtes
 DELAY_MAX           = 5.0   # secondes, délai maximum entre deux requêtes
 MAX_LISTING_PAGES   = 2    # nb max de pages de listing visitées par start_url (0 = illimité)
-MAX_ARTICLES_PER_SITE = 10  # nb max d'articles sauvegardés par site (0 = illimité)
+MAX_ARTICLES_PER_SITE = 3  # nb max d'articles sauvegardés par site (0 = illimité)
 RESPECT_ROBOTS      = False
 HEADLESS            = False # navigateur visible pour résoudre les anti-bots manuellement
 CURRENT_YEAR_ONLY   = True  # ne retenir que les articles de l'année en cours
@@ -52,8 +52,9 @@ EXCLUDED_EXTENSIONS = {
 EXCLUDED_PATH_PATTERNS = [
     r"/tag/", r"/tags/", r"/author/", r"/auteur/", r"/auteurs/",
     r"/category/", r"/categorie/", r"/feed/?$", r"/rss/?$",
-    r"/search[/?]", r"/login", r"/register", r"/cart", r"/panier",
-    r"/account/", r"/cdn-cgi/", r"[?&]s=",
+    r"/search[/?]", r"/login", r"/register", r"/sign-in/?$",
+    r"/subscription/?$", r"/forgot-password/?$", r"/account/",
+    r"/cart", r"/panier", r"/cdn-cgi/", r"[?&]s=",
 ]
 
 # Patterns de détection de pagination (URL)
@@ -371,11 +372,17 @@ def is_news_page(html: str, url: str, site_cfg: SiteConfig) -> bool:
 # CLASSIFICATION DES LIENS
 # ─────────────────────────────────────────────────────────────────────────────
 def is_article_url(url: str, site_cfg: SiteConfig) -> bool:
-    """Retourne True si l'URL est un article selon le pattern du site."""
+    """Retourne True si l'URL est un candidat article."""
+    
+    # Toujours appliquer les exclusions générales,
+    # même quand un article_url_pattern existe dans le YAML.
+    if not is_valid_link(url):
+        return False
+
     if site_cfg.article_url_pattern:
         return bool(re.search(site_cfg.article_url_pattern, url, re.IGNORECASE))
-    # Sans pattern : tout lien valide est candidat article (filtré par HTML ensuite)
-    return is_valid_link(url)
+
+    return True
 
 def is_pagination_url(url: str, site_cfg: SiteConfig) -> bool:
     """Retourne True si l'URL est une page de pagination."""
@@ -504,6 +511,25 @@ async def visit_article(
             return
 
         html = await page.content()
+
+        # Contrôle en plus
+        if not is_news_page(html, url, SiteConfig(
+            name=site_cfg.name,
+            start_urls=site_cfg.start_urls,
+            article_url_pattern=None,
+            pagination_pattern=site_cfg.pagination_pattern,
+            date_selector=site_cfg.date_selector,
+            date_regex=site_cfg.date_regex,
+            date_format=site_cfg.date_format,
+            disable_nav_filter=site_cfg.disable_nav_filter,
+        )):
+    
+            log(f"  -> pas un article (contrôle HTML)")
+            journal[url] = {"status": "not_article"}
+            stats["visited"] = stats.get("visited", 0) + 1
+            save_journal(journal)
+            await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+            return
 
         # Vérification HTML pour les sites sans article_url_pattern
         if not site_cfg.article_url_pattern and not is_news_page(html, url, site_cfg):
@@ -654,7 +680,18 @@ async def main():
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1280, "height": 900},
-        )
+            locale="en-US",
+            timezone_id="America/New_York",
+            extra_http_headers={
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,image/apng,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+                "Upgrade-Insecure-Requests": "1",
+            },
+        )        
+        
         page = await context.new_page()
 
         for site_cfg in sites:
